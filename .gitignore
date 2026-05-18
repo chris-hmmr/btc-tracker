@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Environment / secrets
+.env
+.env.*
+*.env
+config.local.*
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Logs (if ever written locally)
+*.log
+
+# NOTE: Your address book, seen transaction IDs, and log files are stored
+# in ~/.btc-tracker/ (outside this repo) and are never committed.

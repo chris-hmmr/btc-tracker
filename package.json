@@ -1,0 +1,20 @@
+{
+  "name": "btc-tracker",
+  "version": "1.0.0",
+  "description": "Bitcoin address transaction tracker daemon",
+  "main": "src/index.js",
+  "bin": {
+    "btc-tracker": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "daemon": "node src/daemon.js"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "axios": "^1.6.0",
+    "chalk": "^4.1.2",
+    "commander": "^11.0.0",
+    "node-notifier": "^10.0.1"
+  }
+}
