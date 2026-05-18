@@ -1,75 +1,99 @@
 # btc-tracker
 
-A CLI Bitcoin address transaction tracker. Runs as an interactive TUI, a background daemon, or a one-shot report.
+A CLI Bitcoin portfolio tracker with an interactive TUI. Add multiple BTC addresses or zpub/xpub keys, monitor balances, and track incoming transactions — all from the terminal.
 
 ## Install
 
 ```bash
 cd btc-tracker
 npm install
-npm link   # makes `btc-tracker` available globally (optional)
+npm link   # optional — makes `btc-tracker` available as a global command
 ```
 
-## Usage
-
-### Interactive TUI dashboard
-Opens a live terminal dashboard. Polls every 60s, press `r` to refresh manually.
+## Running the app
 
 ```bash
-node src/index.js watch <your-btc-address>
+node src/index.js
 # or if globally linked:
-btc-tracker watch <your-btc-address>
+btc-tracker
 ```
 
-Options:
-- `-i, --interval <seconds>` — polling interval (default: 60)
+This opens the **portfolio menu** — the main screen of the app.
 
-### Background daemon
-Runs silently in the background. Logs all activity and new transactions to `~/.btc-tracker/tracker.log`.
+## Portfolio menu
 
-```bash
-# Run in background, keep terminal free
-node src/index.js daemon <your-btc-address> &
+The default view on launch. Shows all your tracked addresses with live balances and a portfolio total.
 
-# Or detach fully with nohup
-nohup node src/index.js daemon <your-btc-address> > /dev/null 2>&1 &
+```
+  ██████╗ ████████╗  ██████╗
+  ██╔══██╗╚══██╔══╝ ██╔════╝   T R A C K E R
+  ██████╔╝   ██║    ██║        Portfolio Manager
+  ...
+
+  Label            Address              Balance          Txs
+  My Wallet        zpub6Cng…k3fx        0.58142000 BTC   12
+  Cold Storage     bc1q…xyz             1.20000000 BTC    5
+
+  Total Balance:  1.78142000 BTC  (≈ $89,071)
 ```
 
-Stop it:
+**Keys:**
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Navigate addresses |
+| `a` | Add a new address or zpub/xpub |
+| `d` | Delete selected address |
+| `w` / `Enter` | Open transaction watcher for selected address |
+| `r` | Refresh all balances |
+| `q` | Quit |
+
+## Adding addresses
+
+Press `[a]` in the menu and enter any of:
+- A standard BTC address: `bc1q…`, `1…`, `3…`
+- An extended public key: `zpub…`, `xpub…`, `ypub…`
+
+You'll be prompted for an optional label. Addresses are saved locally to `~/.btc-tracker/state.json` and loaded automatically on every launch.
+
+## Transaction watcher
+
+Press `[w]` on any address in the menu to open a live transaction dashboard for that address. Shows balance stats, incoming transactions, and alerts on new activity. Press `[q]` to return to the portfolio menu.
+
+## CLI commands
+
+You can also use commands directly without the menu:
+
 ```bash
-# PID is printed on start, or read from:
+# Watch a specific address or zpub in the transaction dashboard
+btc-tracker watch <address-or-zpub>
+btc-tracker watch <address-or-zpub> -i 30   # poll every 30s
+
+# One-shot balance report, then exit
+btc-tracker report <address-or-zpub>
+
+# Background daemon (no TUI), logs to ~/.btc-tracker/tracker.log
+btc-tracker daemon <address-or-zpub>
+btc-tracker daemon <address-or-zpub> &          # run in background
+nohup btc-tracker daemon <address-or-zpub> > /dev/null 2>&1 &
+
+# Stop the daemon
 kill $(cat ~/.btc-tracker/daemon.pid)
+
+# Tail the log file
+btc-tracker logs
+
+# Clear saved state (seen tx IDs, etc.)
+btc-tracker clear-state
 ```
 
-### One-shot report
-Fetch and print current state, then exit.
+## Data & privacy
 
-```bash
-node src/index.js report <your-btc-address>
-```
+All data is stored locally in `~/.btc-tracker/` — never sent anywhere except the public [mempool.space](https://mempool.space) API (no account or API key required):
 
-### Tail logs
-```bash
-node src/index.js logs
-# or directly:
-tail -f ~/.btc-tracker/tracker.log
-```
+| File | Contents |
+|------|----------|
+| `state.json` | Address book, seen transaction IDs |
+| `tracker.log` | Append-only log of polls and new transactions |
+| `daemon.pid` | PID of a running daemon (if any) |
 
-### Clear saved state
-Resets seen transaction IDs (so all txs appear as "new" again on next run):
-```bash
-node src/index.js clear-state
-```
-
-## State & logs
-
-All data is stored in `~/.btc-tracker/`:
-- `state.json` — seen transaction IDs (to detect new ones)
-- `tracker.log` — append-only log of all polls and new transactions
-- `daemon.pid` — PID of running daemon (if any)
-
-## Notes
-
-- Uses the public [mempool.space](https://mempool.space) API — no API key needed.
-- New transactions are detected by comparing against previously seen tx IDs stored in `~/.btc-tracker/state.json`.
-- In daemon mode, new transactions trigger a log entry — hook this up to a notification service if needed.
+This directory is outside the project folder and is never committed to git.
