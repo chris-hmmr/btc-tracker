@@ -16,9 +16,9 @@ npm link   # makes `btc-tracker` available globally (optional)
 Opens a live terminal dashboard. Polls every 60s, press `r` to refresh manually.
 
 ```bash
-node src/index.js watch bc1qm3pmpkmxehcr80u9wnsqnxry2v84lnkmp3ym3x
+node src/index.js watch <your-btc-address>
 # or if globally linked:
-btc-tracker watch bc1qm3pmpkmxehcr80u9wnsqnxry2v84lnkmp3ym3x
+btc-tracker watch <your-btc-address>
 ```
 
 Options:
@@ -29,10 +29,10 @@ Runs silently in the background. Logs all activity and new transactions to `~/.b
 
 ```bash
 # Run in background, keep terminal free
-node src/index.js daemon bc1qm3pmpkmxehcr80u9wnsqnxry2v84lnkmp3ym3x &
+node src/index.js daemon <your-btc-address> &
 
 # Or detach fully with nohup
-nohup node src/index.js daemon bc1qm3pmpkmxehcr80u9wnsqnxry2v84lnkmp3ym3x > /dev/null 2>&1 &
+nohup node src/index.js daemon <your-btc-address> > /dev/null 2>&1 &
 ```
 
 Stop it:
@@ -45,7 +45,7 @@ kill $(cat ~/.btc-tracker/daemon.pid)
 Fetch and print current state, then exit.
 
 ```bash
-node src/index.js report bc1qm3pmpkmxehcr80u9wnsqnxry2v84lnkmp3ym3x
+node src/index.js report <your-btc-address>
 ```
 
 ### Tail logs
