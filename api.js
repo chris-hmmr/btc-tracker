@@ -16,22 +16,17 @@ async function getTransactions(address) {
   return res.data;
 }
 
-async function getXpubInfo(xpub) {
-  const res = await axios.get(`${BASE}/xpub/${xpub}`, { timeout: 15000 });
-  return res.data;
-}
-
-async function getXpubTransactions(xpub) {
-  const res = await axios.get(`${BASE}/xpub/${xpub}/txs`, { timeout: 15000 });
-  return res.data;
-}
-
-async function getAnyAddressInfo(addr) {
-  return isExtendedKey(addr) ? getXpubInfo(addr) : getAddressInfo(addr);
+async function getAnyAddressInfo(addr, opts) {
+  if (isExtendedKey(addr)) {
+    const { scanXpub } = require('./xpub');
+    return scanXpub(addr, opts);
+  }
+  return getAddressInfo(addr);
 }
 
 async function getAnyTransactions(addr) {
-  return isExtendedKey(addr) ? getXpubTransactions(addr) : getTransactions(addr);
+  if (isExtendedKey(addr)) return [];
+  return getTransactions(addr);
 }
 
 async function getBtcPrice() {
@@ -59,7 +54,6 @@ function satToBtc(sat) {
 
 module.exports = {
   getAddressInfo, getTransactions,
-  getXpubInfo, getXpubTransactions,
   getAnyAddressInfo, getAnyTransactions,
   getBtcPrice, getIncomingTxs, satToBtc,
   isExtendedKey,
