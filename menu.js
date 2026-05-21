@@ -38,6 +38,9 @@ async function fetchAllBalances(addressBook, onUpdate, onProgress) {
     const chunkResults = await Promise.all(chunk.map(async (entry, j) => {
       const absIdx = i + j;
       try {
+        if (entry.type === 'manual') {
+          return { ...entry, balance: entry.balance || 0, txCount: null, error: null };
+        }
         const info = await getAnyAddressInfo(entry.address, {
           gapLimit: entry.gapLimit,
           onProgress: onProgress ? (msg) => onProgress(absIdx, msg) : undefined,
@@ -124,8 +127,10 @@ function runMenu() {
 
   let cachedData = state.addressBook.map(e => ({
     ...e,
-    balance: e.cachedBalance !== undefined ? e.cachedBalance : null,
-    txCount: e.cachedTxCount !== undefined ? e.cachedTxCount : null,
+    balance: e.type === 'manual'
+      ? (e.balance || 0)
+      : (e.cachedBalance !== undefined ? e.cachedBalance : null),
+    txCount: e.type === 'manual' ? null : (e.cachedTxCount !== undefined ? e.cachedTxCount : null),
     error: null,
   }));
   let btcPrice = null;
@@ -176,22 +181,23 @@ function runMenu() {
 
     const items = cachedData.map((entry) => {
       const label = (entry.label || 'Unnamed').slice(0, 16).padEnd(16);
-      const addrShort = shortAddr(entry.address).padEnd(20);
+      const isManual = entry.type === 'manual';
+      const addrShort = isManual ? '{gray-fg}manual{/gray-fg}'.padEnd(20) : shortAddr(entry.address).padEnd(20);
 
-      if (entry.error) {
-        return ' {yellow-fg}' + label + '{/yellow-fg}  {gray-fg}' + addrShort + '{/gray-fg}  {red-fg}fetch error{/red-fg}';
+      if (!isManual && entry.error) {
+        return ' {yellow-fg}' + label + '{/yellow-fg}  {gray-fg}' + shortAddr(entry.address).padEnd(20) + '{/gray-fg}  {red-fg}fetch error{/red-fg}';
       }
-      if (entry.balance === null) {
+      if (!isManual && entry.balance === null) {
         const prog = entry.progressMsg || 'loading…';
-        return ' {cyan-fg}' + label + '{/cyan-fg}  {gray-fg}' + addrShort + '{/gray-fg}  {gray-fg}' + prog + '{/gray-fg}';
+        return ' {cyan-fg}' + label + '{/cyan-fg}  {gray-fg}' + shortAddr(entry.address).padEnd(20) + '{/gray-fg}  {gray-fg}' + prog + '{/gray-fg}';
       }
 
       const balStr = (satToBtc(entry.balance) + ' BTC').padEnd(16);
       const usdStr = btcPrice
         ? '{gray-fg} $' + (entry.balance / 1e8 * btcPrice).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + '{/gray-fg}'
         : '';
-      const txStr = '{gray-fg}' + entry.txCount + ' txs{/gray-fg}';
-      return ' {cyan-fg}' + label + '{/cyan-fg}  {gray-fg}' + addrShort + '{/gray-fg}  {bold}{green-fg}' + balStr + '{/green-fg}{/bold}' + usdStr + '  ' + txStr;
+      const txStr = (!isManual && entry.txCount !== null) ? '  {gray-fg}' + entry.txCount + ' txs{/gray-fg}' : '';
+      return ' {cyan-fg}' + label + '{/cyan-fg}  ' + addrShort + '  {bold}{green-fg}' + balStr + '{/green-fg}{/bold}' + usdStr + txStr;
     });
 
     addrList.setItems(items);
@@ -356,6 +362,37 @@ function runMenu() {
     addrList.focus();
   }
 
+  function doEditBalance(idx) {
+    const entry = state.addressBook[idx];
+    const current = satToBtc(entry.balance || 0);
+    const prompt = blessed.prompt({
+      parent: screen,
+      top: 'center', left: 'center',
+      height: 'shrink', width: 60,
+      border: 'line',
+      label: ' Update Balance ',
+      tags: true,
+      style: { border: { fg: 'yellow' } },
+    });
+    prompt.input('Balance in BTC:', current, (_err, value) => {
+      if (value !== null && value !== undefined) {
+        const n = parseFloat(value.replace(/,/g, ''));
+        if (!isNaN(n) && n >= 0) {
+          const sats = Math.round(n * 1e8);
+          state.addressBook[idx].balance = sats;
+          if (cachedData[idx]) cachedData[idx].balance = sats;
+          saveState(state);
+          setStatus('Balance updated.', 'green');
+          updateDisplay();
+        } else {
+          setStatus('Invalid amount — enter a number like 0.15', 'red');
+        }
+      }
+      addrList.focus();
+      screen.render();
+    });
+  }
+
   function doRemove(idx) {
     const entry = state.addressBook[idx];
     const question = blessed.question({
@@ -372,9 +409,12 @@ function runMenu() {
         state.addressBook.splice(idx, 1);
         cachedData.splice(idx, 1);
         saveState(state);
-        log('Address removed: ' + entry.address);
+        log('Address removed: ' + (entry.address || entry.label));
         setStatus('Removed: ' + entry.label, 'yellow');
         updateDisplay();
+        // Select the item before the removed one, or first item
+        const newIdx = Math.max(0, Math.min(idx, state.addressBook.length - 1));
+        if (state.addressBook.length > 0) addrList.select(newIdx);
       }
       addrList.focus();
       screen.render();
@@ -402,17 +442,25 @@ function runMenu() {
       style: { border: { fg: 'cyan' }, label: { fg: 'cyan', bold: true } },
     });
 
+    const isManual = entry.type === 'manual';
+
     // ── Details panel ────────────────────────────────────────────────────
+    const detailContent = isManual
+      ? '{gray-fg}Type    :{/gray-fg}  Manual balance (off-chain)\n\n' +
+        '{gray-fg}Balance :{/gray-fg}  ' + balStr + '\n' +
+        '{gray-fg}Added   :{/gray-fg}  ' + (entry.addedAt ? new Date(entry.addedAt).toLocaleString() : 'unknown') + '\n' +
+        '{gray-fg}Notes   :{/gray-fg}  ' + (entry.notes || '{gray-fg}(none){/gray-fg}')
+      : '{gray-fg}Address :{/gray-fg}  ' + entry.address + '\n\n' +
+        '{gray-fg}Balance :{/gray-fg}  ' + balStr + '\n' +
+        '{gray-fg}Added   :{/gray-fg}  ' + (entry.addedAt ? new Date(entry.addedAt).toLocaleString() : 'unknown') + '\n' +
+        '{gray-fg}Notes   :{/gray-fg}  ' + (entry.notes || '{gray-fg}(none){/gray-fg}');
+
     const details = blessed.box({
       parent: modal,
       top: 1, left: 2,
       width: '100%-4', height: 7,
       tags: true,
-      content:
-        '{gray-fg}Address :{/gray-fg}  ' + entry.address + '\n\n' +
-        '{gray-fg}Balance :{/gray-fg}  ' + balStr + '\n' +
-        '{gray-fg}Added   :{/gray-fg}  ' + (entry.addedAt ? new Date(entry.addedAt).toLocaleString() : 'unknown') + '\n' +
-        '{gray-fg}Notes   :{/gray-fg}  ' + (entry.notes || '{gray-fg}(none){/gray-fg}'),
+      content: detailContent,
     });
 
     const dividerTop = 8;
@@ -426,14 +474,21 @@ function runMenu() {
       tags: true,
     });
 
-    // ── Action list (dynamic based on address type) ───────────────────────
-    const actions = [
-      { label: '  ✎  Edit label',                fn: () => doEditLabel(idx) },
-      { label: '  ✎  Edit notes',                fn: () => doEditNotes(idx) },
-      { label: '  ⬡  Watch transactions',         fn: () => doWatch(idx) },
-      { label: '  ⎘  Copy address to clipboard',  fn: () => doCopyAddress(idx) },
-      { label: '  ✕  Remove address',             fn: () => doRemove(idx) },
-    ];
+    // ── Action list ──────────────────────────────────────────────────────
+    const actions = isManual
+      ? [
+          { label: '  ✎  Edit label',         fn: () => doEditLabel(idx) },
+          { label: '  ✎  Update balance',      fn: () => doEditBalance(idx) },
+          { label: '  ✎  Edit notes',          fn: () => doEditNotes(idx) },
+          { label: '  ✕  Remove',              fn: () => doRemove(idx) },
+        ]
+      : [
+          { label: '  ✎  Edit label',                fn: () => doEditLabel(idx) },
+          { label: '  ✎  Edit notes',                fn: () => doEditNotes(idx) },
+          { label: '  ⬡  Watch transactions',         fn: () => doWatch(idx) },
+          { label: '  ⎘  Copy address to clipboard',  fn: () => doCopyAddress(idx) },
+          { label: '  ✕  Remove address',             fn: () => doRemove(idx) },
+        ];
 
     const list = blessed.list({
       parent: modal,
@@ -500,36 +555,58 @@ function runMenu() {
       style: { border: { fg: 'yellow' } },
     });
 
-    prompt.input('BTC address / zpub / xpub:', '', (err, addrInput) => {
-      if (err || !addrInput || !addrInput.trim()) {
+    prompt.input('BTC address / zpub / xpub / exchange name:', '', (err, rawInput) => {
+      if (err || !rawInput || !rawInput.trim()) {
         addrList.focus();
         screen.render();
         return;
       }
-      const address = addrInput.trim();
+      const input = rawInput.trim();
+      const looksLikeAddress = /^(bc1|[13]|[xyzXYZ]pub)/i.test(input);
 
-      if (state.addressBook.some(e => e.address === address)) {
+      if (!looksLikeAddress) {
+        // Manual balance entry
+        prompt.input('Balance in BTC:', '0', (_err, btcInput) => {
+          const n = parseFloat((btcInput || '0').replace(/,/g, ''));
+          if (isNaN(n) || n < 0) {
+            setStatus('Invalid amount — entry not added.', 'red');
+            addrList.focus();
+            return;
+          }
+          const sats = Math.round(n * 1e8);
+          const newEntry = { type: 'manual', label: input, balance: sats, addedAt: Date.now() };
+          state.addressBook.push(newEntry);
+          cachedData.push({ ...newEntry, error: null });
+          saveState(state);
+          log('Manual entry added: ' + input + ' (' + satToBtc(sats) + ' BTC)');
+          setStatus('Added: ' + input, 'green');
+          addrList.focus();
+          updateDisplay();
+        });
+        return;
+      }
+
+      if (state.addressBook.some(e => e.address === input)) {
         setStatus('Address already in portfolio.', 'yellow');
         addrList.focus();
         return;
       }
 
-      const defaultLabel = shortAddr(address);
+      const defaultLabel = shortAddr(input);
       prompt.input('Label (Enter for default):', defaultLabel, (_err, labelInput) => {
         const label = (labelInput && labelInput.trim()) ? labelInput.trim() : defaultLabel;
-        const newEntry = { address, label, addedAt: Date.now() };
+        const newEntry = { address: input, label, addedAt: Date.now() };
         state.addressBook.push(newEntry);
         cachedData.push({ ...newEntry, balance: null, txCount: null, error: null });
         saveState(state);
-        log('Address added: ' + address + ' (' + label + ')');
+        log('Address added: ' + input + ' (' + label + ')');
         addrList.focus();
         const newIdx = state.addressBook.length - 1;
-        // Subscribe the new address to live monitoring
         if (monitor) {
-          if (isExtendedKey(address)) {
-            try { monitor.watch(deriveReceiveAddresses(address, 110)); } catch { /* ignore */ }
+          if (isExtendedKey(input)) {
+            try { monitor.watch(deriveReceiveAddresses(input, 110)); } catch { /* ignore */ }
           } else {
-            monitor.watch([address]);
+            monitor.watch([input]);
           }
         }
         refreshOne(newIdx);
