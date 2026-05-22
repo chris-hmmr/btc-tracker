@@ -29,6 +29,11 @@ async function getAnyTransactions(addr) {
   return getTransactions(addr);
 }
 
+async function getTransaction(txid) {
+  const res = await axios.get(`${BASE}/tx/${txid}`, { timeout: 10000 });
+  return res.data;
+}
+
 async function getBtcPrice() {
   try {
     const res = await axios.get(`${BASE}/v1/prices`, { timeout: 5000 });
@@ -53,7 +58,7 @@ function satToBtc(sat) {
 }
 
 module.exports = {
-  getAddressInfo, getTransactions,
+  getAddressInfo, getTransactions, getTransaction,
   getAnyAddressInfo, getAnyTransactions,
   getBtcPrice, getIncomingTxs, satToBtc,
   isExtendedKey,

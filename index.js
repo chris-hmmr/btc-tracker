@@ -87,6 +87,64 @@ program
   });
 
 program
+  .command('check-tx <txid>')
+  .description('Look up a transaction and check if its outputs match any address in the portfolio')
+  .action(async (txid) => {
+    const axios = require('axios');
+    const { loadState } = require('./store');
+    const { deriveReceiveAddresses } = require('./xpub');
+    const { isExtendedKey } = require('./api');
+
+    let tx;
+    try {
+      const res = await axios.get('https://mempool.space/api/tx/' + txid, { timeout: 10000 });
+      tx = res.data;
+    } catch (err) {
+      console.error('Could not fetch transaction:', err.message);
+      process.exit(1);
+    }
+
+    console.log('\nTransaction: ' + txid);
+    console.log('Status:      ' + (tx.status && tx.status.confirmed ? 'confirmed (block ' + tx.status.block_height + ')' : 'unconfirmed / mempool'));
+    console.log('\nOutputs:');
+
+    const state = loadState();
+    const watchedAddresses = new Map(); // address -> entry label
+
+    state.addressBook.forEach(entry => {
+      if (isExtendedKey(entry.address)) {
+        try {
+          deriveReceiveAddresses(entry.address, 150).forEach((addr, i) => {
+            watchedAddresses.set(addr, entry.label + ' [recv #' + i + ']');
+          });
+        } catch {}
+      } else if (entry.type !== 'manual') {
+        watchedAddresses.set(entry.address, entry.label);
+      }
+    });
+
+    let anyMatch = false;
+    for (const vout of (tx.vout || [])) {
+      const addr = vout.scriptpubkey_address || '(unknown)';
+      const btc  = (vout.value / 1e8).toFixed(8);
+      const match = watchedAddresses.get(addr);
+      if (match) {
+        console.log('  ✓ ' + addr + '  ' + btc + ' BTC  ← ' + match);
+        anyMatch = true;
+      } else {
+        console.log('  ✗ ' + addr + '  ' + btc + ' BTC  (not in portfolio)');
+      }
+    }
+
+    if (!anyMatch) {
+      console.log('\nNo outputs match any portfolio address (first 150 receive addresses checked).');
+      console.log('The destination address may be beyond the current watch window.');
+    }
+    console.log('');
+    process.exit(0);
+  });
+
+program
   .command('import-csv <file>')
   .description('Import Bitcoin addresses from a Coinfinity order CSV into the portfolio')
   .action((file) => {

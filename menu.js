@@ -3,7 +3,7 @@
 const { execSync } = require('child_process');
 const blessed = require('blessed');
 const { loadState, saveState, log } = require('./store');
-const { getAnyAddressInfo, getBtcPrice, satToBtc, isExtendedKey } = require('./api');
+const { getAnyAddressInfo, getBtcPrice, satToBtc, isExtendedKey, getTransaction } = require('./api');
 const { deriveReceiveAddresses } = require('./xpub');
 const AddressMonitor = require('./ws-monitor');
 
@@ -47,7 +47,8 @@ async function fetchAllBalances(addressBook, onUpdate, onProgress) {
         });
         const recv = info.chain_stats.funded_txo_sum + info.mempool_stats.funded_txo_sum;
         const spent = info.chain_stats.spent_txo_sum + info.mempool_stats.spent_txo_sum;
-        return { ...entry, balance: recv - spent, txCount: info.chain_stats.tx_count + info.mempool_stats.tx_count, error: null };
+        const extra = info.lastFundedRecvIdx !== undefined ? { lastFundedRecvIdx: info.lastFundedRecvIdx } : {};
+        return { ...entry, ...extra, balance: recv - spent, txCount: info.chain_stats.tx_count + info.mempool_stats.tx_count, error: null };
       } catch (err) {
         return { ...entry, balance: null, txCount: null, error: err.message };
       }
@@ -88,7 +89,7 @@ function runMenu() {
   });
 
   const addrList = blessed.list({
-    top: 8, left: 0, width: '100%', height: '100%-16',
+    top: 8, left: 0, width: '100%', height: '100%-24',
     tags: true,
     border: { type: 'line' },
     label: ' Managed Addresses ',
@@ -105,11 +106,20 @@ function runMenu() {
   });
 
   const totalBox = blessed.box({
-    bottom: 3, left: 0, width: '100%', height: 5,
+    bottom: 11, left: 0, width: '100%', height: 5,
     tags: true,
     border: { type: 'line' },
     label: ' Portfolio Total ',
     style: { border: { fg: 'green' } },
+  });
+
+  const activityBox = blessed.box({
+    bottom: 3, left: 0, width: '100%', height: 8,
+    tags: true,
+    border: { type: 'line' },
+    label: ' Recent Activity ',
+    style: { border: { fg: 'gray' } },
+    content: '  {gray-fg}No recent activity — watching for new transactions…{/gray-fg}',
   });
 
   const statusBar = blessed.box({
@@ -121,6 +131,7 @@ function runMenu() {
 
   screen.append(header);
   screen.append(addrList);
+  screen.append(activityBox);
   screen.append(totalBox);
   screen.append(statusBar);
   addrList.focus();
@@ -133,9 +144,124 @@ function runMenu() {
     txCount: e.type === 'manual' ? null : (e.cachedTxCount !== undefined ? e.cachedTxCount : null),
     error: null,
   }));
-  let btcPrice = null;
+  let btcPrice = state.lastBtcPrice || null;
   let monitor = null;
   const refreshPending = new Set();
+  let lastTx = null; // { txid, entryLabel, value, confirmed, detectedAt }
+
+  async function checkMempoolOnConnect() {
+    // Detect transactions that arrived before the WebSocket subscription opened.
+    // For zpub: scan backwards from the watch-window ceiling (index 109) and stop
+    // as soon as we reach lastFundedRecvIdx — anything above that boundary is new.
+    if (lastTx) return;
+    const { getAddressInfo } = require('./api');
+    const axios = require('axios');
+
+    for (let i = 0; i < state.addressBook.length; i++) {
+      if (lastTx) return;
+      const entry = state.addressBook[i];
+      if (!entry || entry.type === 'manual') continue;
+
+      if (isExtendedKey(entry.address)) {
+        const boundary = entry.lastFundedRecvIdx !== undefined ? entry.lastFundedRecvIdx : -1;
+        const addrs = deriveReceiveAddresses(entry.address, 110);
+
+        for (let j = 109; j > boundary; j--) {
+          if (lastTx) return;
+          const address = addrs[j];
+          try {
+            const info = await getAddressInfo(address);
+            const txCount = info.chain_stats.tx_count + info.mempool_stats.tx_count;
+            if (txCount === 0) { await new Promise(r => setTimeout(r, 400)); continue; }
+
+            // This index is above the boundary and has transactions — it's new
+            const res = await axios.get(
+              'https://mempool.space/api/address/' + address + '/txs',
+              { timeout: 10000 }
+            );
+            const txs = res.data || [];
+            if (txs.length > 0) {
+              const tx = txs[0];
+              const received = (tx.vout || []).reduce(
+                (sum, o) => o.scriptpubkey_address === address ? sum + o.value : sum, 0
+              );
+              lastTx = {
+                txid:       tx.txid,
+                entryLabel: entry.label,
+                value:      received,
+                confirmed:  !!(tx.status && tx.status.confirmed),
+                type:       'incoming',
+                detectedAt: new Date().toLocaleTimeString(),
+              };
+              updateActivityBox();
+              if (!refreshPending.has(i)) {
+                refreshPending.add(i);
+                refreshOne(i).finally(() => refreshPending.delete(i));
+              }
+            }
+            return;
+          } catch {}
+          await new Promise(r => setTimeout(r, 400));
+        }
+      } else {
+        // Regular address: compare live tx_count to cached
+        try {
+          const info = await getAddressInfo(entry.address);
+          const liveTxCount = info.chain_stats.tx_count + info.mempool_stats.tx_count;
+          if (liveTxCount > (entry.cachedTxCount || 0)) {
+            const res = await axios.get(
+              'https://mempool.space/api/address/' + entry.address + '/txs',
+              { timeout: 10000 }
+            );
+            const txs = res.data || [];
+            if (txs.length > 0 && !lastTx) {
+              const tx = txs[0];
+              const received = (tx.vout || []).reduce(
+                (sum, o) => o.scriptpubkey_address === entry.address ? sum + o.value : sum, 0
+              );
+              lastTx = {
+                txid:       tx.txid,
+                entryLabel: entry.label,
+                value:      received,
+                confirmed:  !!(tx.status && tx.status.confirmed),
+                type:       'incoming',
+                detectedAt: new Date().toLocaleTimeString(),
+              };
+              updateActivityBox();
+              if (!refreshPending.has(i)) {
+                refreshPending.add(i);
+                refreshOne(i).finally(() => refreshPending.delete(i));
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+  }
+
+  function updateActivityBox() {
+    if (!lastTx) return;
+    const sign    = lastTx.value >= 0 ? '+' : '';
+    const btcStr  = sign + satToBtc(Math.abs(lastTx.value)) + ' BTC';
+    const typeTag = lastTx.type === 'removed'
+      ? '{gray-fg}dropped from mempool{/gray-fg}'
+      : lastTx.confirmed
+        ? '{green-fg}✓ confirmed{/green-fg}'
+        : '{yellow-fg}⏳ pending{/yellow-fg}';
+    const usdStr  = btcPrice && lastTx.value !== 0
+      ? '  {gray-fg}≈ $' + (Math.abs(lastTx.value) / 1e8 * btcPrice).toLocaleString('en-US', { maximumFractionDigits: 0 }) + '{/gray-fg}'
+      : '';
+    const shortTxid = lastTx.txid
+      ? lastTx.txid.slice(0, 16) + '…' + lastTx.txid.slice(-8)
+      : '—';
+    activityBox.setContent(
+      '  ' + typeTag + '  {bold}' + btcStr + '{/bold}' + usdStr +
+      '  →  {cyan-fg}' + lastTx.entryLabel + '{/cyan-fg}' +
+      '  {gray-fg}' + lastTx.detectedAt + '{/gray-fg}\n' +
+      '  {gray-fg}txid: ' + shortTxid + '{/gray-fg}'
+    );
+    screen.render();
+  }
 
   function startMonitor() {
     if (monitor) { monitor.stop(); monitor = null; }
@@ -145,20 +271,54 @@ function runMenu() {
     if (Object.keys(watchMap).length === 0) return;
 
     monitor = new AddressMonitor(
-      (address) => {
+      (address, txInfo) => {
         const idx = watchMap[address];
-        if (idx === undefined || refreshPending.has(idx)) return;
-        refreshPending.add(idx);
-        setStatus('New transaction detected — updating…', 'yellow');
-        refreshOne(idx).finally(() => {
-          refreshPending.delete(idx);
-          setStatus('● live', 'green');
-        });
+        if (idx === undefined) return;
+        const entry = state.addressBook[idx];
+
+        // Update activity panel immediately
+        lastTx = {
+          txid:       txInfo.txid,
+          entryLabel: entry ? entry.label : shortAddr(address),
+          value:      txInfo.value,
+          confirmed:  txInfo.confirmed,
+          type:       txInfo.type,
+          detectedAt: new Date().toLocaleTimeString(),
+        };
+        updateActivityBox();
+
+        // Refresh the balance for this entry
+        if (!refreshPending.has(idx)) {
+          refreshPending.add(idx);
+          setStatus('New transaction — updating balance…', 'yellow');
+          refreshOne(idx).finally(() => {
+            refreshPending.delete(idx);
+            setStatus('● live', 'green');
+          });
+        }
       },
       (status) => {
-        if (status === 'connected') setStatus('● live', 'green');
-        else if (status === 'connecting') setStatus('◌ connecting…', 'gray');
-        else if (status === 'disconnected') setStatus('○ reconnecting…', 'yellow');
+        if (status === 'connected') {
+          setStatus('● live', 'green');
+          // On first connect, silently check for transactions that arrived before
+          // the WebSocket subscription was established (WebSocket only delivers new ones)
+          setImmediate(() => checkMempoolOnConnect());
+        } else if (status === 'connecting') {
+          setStatus('◌ connecting…', 'gray');
+        } else if (status === 'disconnected') {
+          setStatus('○ reconnecting…', 'yellow');
+        }
+      },
+      // onBlock: new block confirmed — re-check any pending tx
+      async () => {
+        if (!lastTx || lastTx.confirmed || lastTx.type === 'removed') return;
+        try {
+          const tx = await getTransaction(lastTx.txid);
+          if (tx && tx.status && tx.status.confirmed) {
+            lastTx.confirmed = true;
+            updateActivityBox();
+          }
+        } catch { /* ignore — will resolve on next refresh */ }
       }
     );
     monitor.watch(Object.keys(watchMap));
@@ -238,6 +398,7 @@ function runMenu() {
       cachedData[idx] = { ...entry, balance: recv - spent, txCount: info.chain_stats.tx_count + info.mempool_stats.tx_count, error: null };
       state.addressBook[idx].cachedBalance = cachedData[idx].balance;
       state.addressBook[idx].cachedTxCount = cachedData[idx].txCount;
+      if (info.lastFundedRecvIdx !== undefined) state.addressBook[idx].lastFundedRecvIdx = info.lastFundedRecvIdx;
       saveState(state);
       setStatus('Last refreshed: ' + new Date().toLocaleTimeString(), 'gray');
     } catch (err) {
@@ -277,11 +438,14 @@ function runMenu() {
         getBtcPrice(),
       ]);
       cachedData = newData;
-      if (newPrice) btcPrice = newPrice;
+      if (newPrice) { btcPrice = newPrice; state.lastBtcPrice = newPrice; }
       newData.forEach((entry, i) => {
         if (state.addressBook[i] && entry.balance !== null && !entry.error) {
           state.addressBook[i].cachedBalance = entry.balance;
           state.addressBook[i].cachedTxCount = entry.txCount;
+          if (entry.lastFundedRecvIdx !== undefined) {
+            state.addressBook[i].lastFundedRecvIdx = entry.lastFundedRecvIdx;
+          }
         }
       });
       state.lastFetched = Date.now();
@@ -646,6 +810,8 @@ function runMenu() {
       const ago = mins < 1 ? 'just now' : mins + ' min ago';
       setStatus('Cached from ' + ago + '  —  press [r] to refresh', 'gray');
       startMonitor();
+      // Silently refresh price in background so USD values are current
+      getBtcPrice().then(p => { if (p) { btcPrice = p; state.lastBtcPrice = p; saveState(state); updateDisplay(); } }).catch(() => {});
     } else {
       refresh();
     }

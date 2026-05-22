@@ -7,9 +7,10 @@ const RECONNECT_BASE_MS = 5000;
 const RECONNECT_MAX_MS = 60000;
 
 class AddressMonitor {
-  constructor(onActivity, onStatusChange) {
-    this.onActivity = onActivity;       // (address) => void
+  constructor(onActivity, onStatusChange, onBlock) {
+    this.onActivity = onActivity;         // (address, txInfo) => void
     this.onStatusChange = onStatusChange; // ('connecting'|'connected'|'disconnected') => void
+    this.onBlock = onBlock || null;       // (blockHash) => void
     this.addresses = new Set();
     this.ws = null;
     this._stopped = false;
@@ -69,32 +70,65 @@ class AddressMonitor {
   }
 
   _handleMessage(msg) {
-    const txs = [
-      ...(msg['address-transactions'] || []),
-      ...(msg['address-removed-transactions'] || []),
-    ];
+    // Block confirmed — fire onBlock so callers can re-check pending txids
+    if (msg.block && this.onBlock) {
+      this.onBlock(msg.block.id);
+    }
+
+    const incoming = msg['address-transactions'] || [];
+    const removed  = msg['address-removed-transactions'] || [];
     const triggered = new Set();
-    for (const tx of txs) {
+
+    for (const tx of incoming) {
       for (const vout of (tx.vout || [])) {
         const addr = vout.scriptpubkey_address;
         if (addr && this.addresses.has(addr) && !triggered.has(addr)) {
           triggered.add(addr);
-          this.onActivity(addr);
+          // Calculate amount received at this specific address in this tx
+          const received = (tx.vout || []).reduce(
+            (sum, o) => o.scriptpubkey_address === addr ? sum + o.value : sum, 0
+          );
+          this.onActivity(addr, {
+            txid: tx.txid,
+            confirmed: !!(tx.status && tx.status.confirmed),
+            value: received, // satoshis
+            type: 'incoming',
+          });
         }
       }
       for (const vin of (tx.vin || [])) {
         const addr = vin.prevout && vin.prevout.scriptpubkey_address;
         if (addr && this.addresses.has(addr) && !triggered.has(addr)) {
           triggered.add(addr);
-          this.onActivity(addr);
+          this.onActivity(addr, {
+            txid: tx.txid,
+            confirmed: !!(tx.status && tx.status.confirmed),
+            value: -(vin.prevout.value || 0),
+            type: 'outgoing',
+          });
+        }
+      }
+    }
+
+    // Transactions dropped from mempool — just fire a plain notification
+    for (const tx of removed) {
+      for (const vout of (tx.vout || [])) {
+        const addr = vout.scriptpubkey_address;
+        if (addr && this.addresses.has(addr) && !triggered.has(addr)) {
+          triggered.add(addr);
+          this.onActivity(addr, { txid: tx.txid, confirmed: false, value: 0, type: 'removed' });
         }
       }
     }
   }
 
   _sendSub() {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.addresses.size > 0) {
-      this.ws.send(JSON.stringify({ 'track-addresses': [...this.addresses] }));
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      // Subscribe to block events for confirmation tracking
+      this.ws.send(JSON.stringify({ action: 'want', data: ['blocks'] }));
+      if (this.addresses.size > 0) {
+        this.ws.send(JSON.stringify({ 'track-addresses': [...this.addresses] }));
+      }
     }
   }
 

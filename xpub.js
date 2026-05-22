@@ -73,6 +73,8 @@ async function scanXpub(extKey, opts) {
   let mempoolSpent = 0;
   let mempoolTxCount = 0;
 
+  let lastFundedRecvIdx = -1;
+
   for (const chain of [0, 1]) { // 0 = receive, 1 = change
     const chainNode = root.deriveChild(chain);
     let index = 0;
@@ -104,6 +106,7 @@ async function scanXpub(extKey, opts) {
           consecutive++;
         } else {
           consecutive = 0;
+          if (chain === 0) lastFundedRecvIdx = index;
           chainFunded    += info.chain_stats.funded_txo_sum;
           chainSpent     += info.chain_stats.spent_txo_sum;
           chainTxCount   += info.chain_stats.tx_count;
@@ -121,6 +124,7 @@ async function scanXpub(extKey, opts) {
   }
 
   return {
+    lastFundedRecvIdx,
     chain_stats: {
       funded_txo_sum: chainFunded,
       spent_txo_sum: chainSpent,
